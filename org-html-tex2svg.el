@@ -1,8 +1,10 @@
 ;;; org-html-tex2svg.el --- Async LaTeX to SVG for Org HTML export -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2025 MT Lin
+;; Copyright (C) 2026 MT Lin
 
 ;; Author: MT Lin <https://github.com/szch79>
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "28.1") (org "9.7"))
 ;; Homepage: https://github.com/szch79/org-html-tex2svg
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -52,7 +54,7 @@ Computed from `org-html-tex2svg-environments'.")
   '("tikzpicture" "tikzcd")
   "List of LaTeX environment names that trigger SVG conversion.
 
-When a LaTeX fragment contains \\begin{NAME}...\\end{NAME} and NAME matches one
+When a LaTeX fragment contains \\begin{NAME}...\\end{NAME} and NAME matches
 one of these strings, it will be rendered to SVG.  Note that NAME does not need
 to be the outermost environment.
 
@@ -61,21 +63,20 @@ Use `setopt' to set this variable."
   :set (lambda (sym val)
          (set-default sym val)
          (setq org-html-tex2svg--env-regexp
-               (let ((kw-opt (regexp-opt val)))
-                 (rx-to-string
-                  `(seq "\\begin{"
-                        (regexp ,kw-opt)
-                        "}"
-                        (* anything)
-                        "\\end{"
-                        (regexp ,kw-opt)
-                        "}")))))
+               (rx-to-string
+                `(seq "\\begin{"
+                      (group (regexp ,(regexp-opt val)))
+                      "}"
+                      (* anything)
+                      "\\end{"
+                      (backref 1)
+                      "}"))))
   :initialize #'custom-initialize-reset
   :group 'org-html-tex2svg)
 
 (defcustom org-html-tex2svg-process-default 'dvisvgm
-  "The default process to convert LaTeX fragments to image files when export.
-All available processes and theirs documents can be found in
+  "The default process to convert LaTeX fragments to image files on export.
+All available processes and their documentation can be found in
 `org-latex-preview-process-alist', which see.
 
 The process must produce SVG output."
@@ -85,7 +86,7 @@ The process must produce SVG output."
            (let* ((process-info (alist-get val org-latex-preview-process-alist))
                   (output-type (plist-get process-info :image-output-type)))
              (unless (equal output-type "svg")
-               (user-error "org-html-tex2svg: process `%s' does not produce SVG"
+               (user-error "org-html-tex2svg: process `%s' did not produce SVG"
                            val))))
          (set-default sym val))
   :initialize #'custom-initialize-default
@@ -140,7 +141,7 @@ Matched against environments in `org-html-tex2svg-environments'."
        (string-match-p org-html-tex2svg--env-regexp body)))
 
 (defun org-html-tex2svg--default-trigger (backend info)
-  "Return non-nil if BACKEND is derived from HTML and uses MathJax.
+  "Return non-nil if BACKEND is derived from HTML with MathJax enabled.
 The MathJax check is done by checking the `:with-latex' property of INFO.
 
 For BACKEND and INFO, check `org-html-tex2svg-trigger-function'."
@@ -267,7 +268,10 @@ Return nil otherwise.  INFO is the export communication channel."
 ;;;
 
 (defun org-html-tex2svg--org-html-latex-a (orig-fun el contents info)
-  "Advice for HTML export of LaTeX fragments."
+  "Around advice for the HTML transcoders of LaTeX elements.
+ORIG-FUN is the advised transcoder and EL, CONTENTS and INFO its arguments.
+When `org-html-tex2svg-trigger-function' approves, try SVG conversion for EL
+first; otherwise defer to ORIG-FUN."
   (or (and (funcall org-html-tex2svg-trigger-function
                     (org-export-backend-name (plist-get info :back-end))
                     info)
@@ -275,7 +279,10 @@ Return nil otherwise.  INFO is the export communication channel."
       (funcall orig-fun el contents info)))
 
 (defun org-html-tex2svg--parse-tree-filter (tree backend info)
-  "Filter for `org-export-filter-parse-tree-functions'."
+  "Start async SVG generation for TREE, then return TREE unchanged.
+For `org-export-filter-parse-tree-functions'.  Generation only starts when
+calling `org-html-tex2svg-trigger-function' with BACKEND and INFO returns
+non-nil."
   (when (funcall org-html-tex2svg-trigger-function backend info)
     (org-html-tex2svg--start-async-generation tree info))
   tree)
@@ -285,18 +292,22 @@ Return nil otherwise.  INFO is the export communication channel."
 ;;;
 
 (defun org-html-tex2svg-extend-transcoder (base)
-  "Return a transcoder that extends the BASE transcode to try tex2svg."
+  "Return a transcoder wrapping BASE with tex2svg support."
   (lambda (element contents info)
     (or (org-html-tex2svg--latex-to-svg element info)
         (funcall base element contents info))))
 
-(defalias 'org-html-tex2svg-latex-environment
-  (org-html-tex2svg-extend-transcoder #'org-html-latex-environment)
-  "Transcoder for `latex-environment' with tex2svg support.")
+(defun org-html-tex2svg-latex-environment (element contents info)
+  "Transcode a `latex-environment' ELEMENT, trying tex2svg first.
+Fall back to `org-html-latex-environment' with ELEMENT, CONTENTS and INFO."
+  (or (org-html-tex2svg--latex-to-svg element info)
+      (org-html-latex-environment element contents info)))
 
-(defalias 'org-html-tex2svg-latex-fragment
-  (org-html-tex2svg-extend-transcoder #'org-html-latex-fragment)
-  "Transcoder for `latex-fragment' with tex2svg support.")
+(defun org-html-tex2svg-latex-fragment (element contents info)
+  "Transcode a `latex-fragment' ELEMENT, trying tex2svg first.
+Fall back to `org-html-latex-fragment' with ELEMENT, CONTENTS and INFO."
+  (or (org-html-tex2svg--latex-to-svg element info)
+      (org-html-latex-fragment element contents info)))
 
 (defalias 'org-html-tex2svg-filter-parse-tree
   #'org-html-tex2svg--parse-tree-filter
@@ -314,10 +325,8 @@ Signals an error if `org-latex-preview' is not available."
     (user-error (concat "org-html-tex2svg requires `org-latex-preview', see: "
                         "https://abode.karthinks.com/org-latex-preview/"))))
 
-;;;###autoload
-(defun org-html-tex2svg-enable ()
-  "Enable async LaTeX to SVG conversion for Org HTML export."
-  (interactive)
+(defun org-html-tex2svg--enable ()
+  "Install the export hooks and advice for `org-html-tex2svg-mode'."
   (org-html-tex2svg--check-dependencies)
   (add-hook 'org-export-filter-parse-tree-functions
             #'org-html-tex2svg--parse-tree-filter)
@@ -326,9 +335,8 @@ Signals an error if `org-latex-preview' is not available."
   (advice-add 'org-html-latex-fragment :around
               #'org-html-tex2svg--org-html-latex-a))
 
-(defun org-html-tex2svg-disable ()
-  "Disable async LaTeX to SVG conversion for Org HTML export."
-  (interactive)
+(defun org-html-tex2svg--disable ()
+  "Remove the export hooks and advice installed by `org-html-tex2svg-mode'."
   (remove-hook 'org-export-filter-parse-tree-functions
                #'org-html-tex2svg--parse-tree-filter)
   (advice-remove 'org-html-latex-environment
@@ -344,8 +352,8 @@ rendered to inline SVG during HTML export."
   :global t
   :group 'org-html-tex2svg
   (if org-html-tex2svg-mode
-      (org-html-tex2svg-enable)
-    (org-html-tex2svg-disable)))
+      (org-html-tex2svg--enable)
+    (org-html-tex2svg--disable)))
 
 (provide 'org-html-tex2svg)
 
