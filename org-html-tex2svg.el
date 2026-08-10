@@ -162,21 +162,23 @@ use to reuse its cache."
    nil
    number))
 
-(defun org-html-tex2svg--load-svg-content (path)
+(defun org-html-tex2svg--load-svg-content (path &optional label)
   "Read SVG file at PATH and return the <svg>...</svg> element with scaling.
-Return nil if PATH is nil or the file doesn't exist."
+If LABEL is non-nil, add role=\"img\" and aria-label attributes to the <svg>
+element so that LABEL becomes its accessible name.  Return nil if PATH is nil
+or the file doesn't exist."
   (when (and path (file-exists-p path))
     (with-temp-buffer
       (insert-file-contents path)
       (goto-char (point-min))
       (when (re-search-forward "<svg[^>]*>" nil t)
         (let ((svg-start (match-beginning 0))
-              (svg-tag-end (match-end 0)))
+              (svg-tag-end (copy-marker (match-end 0))))
           ;; Scale width/height attributes if present
           (unless (= org-html-tex2svg-scale 1.0)
             (save-excursion
-              (goto-char svg-start)
               (dolist (attr '("width" "height"))
+                (goto-char svg-start)
                 (when (re-search-forward
                        (rx-to-string
                         `(seq word-boundary
@@ -193,6 +195,10 @@ Return nil if PATH is nil or the file doesn't exist."
                     (replace-match
                      (format "%s=%s%g%s%s"
                              attr quote-char scaled unit quote-char)))))))
+          (when label
+            (goto-char (+ svg-start (length "<svg")))
+            (insert " " (org-html--make-attribute-string
+                         (list :role "img" :aria-label label))))
           (goto-char (point-max))
           (when (re-search-backward "</svg>" nil t)
             (buffer-substring-no-properties svg-start (match-end 0))))))))
@@ -215,7 +221,7 @@ INFO is the export communication channel."
   (setq org-html-tex2svg--numbering-table
         (org-latex-preview--environment-numbering-table tree))
   (let* ((preamble (org-latex-preview--get-preamble))
-         (mapped
+         (fragment-info
           (org-element-map tree '(latex-environment latex-fragment)
             (lambda (el)
               (let* ((body (org-element-property :value el))
@@ -231,8 +237,7 @@ INFO is the export communication channel."
                                 :background "Transparent"
                                 :number ,number))
                     :key ,hash))))
-            info))
-         (fragment-info (delq nil mapped)))
+            info)))
     (when fragment-info
       (setq org-html-tex2svg--async-tasks
             (org-latex-preview--create-image-async
@@ -255,11 +260,13 @@ Return nil otherwise.  INFO is the export communication channel."
         (apply #'org-async-wait-for org-html-tex2svg--async-tasks)
         (setq org-html-tex2svg--async-tasks nil))
       (let* ((preamble (org-latex-preview--get-preamble))
-             (number (gethash el org-html-tex2svg--numbering-table))
+             (number (and org-html-tex2svg--numbering-table
+                          (gethash el org-html-tex2svg--numbering-table)))
              (hash (org-html-tex2svg--compute-hash body preamble number))
              (cached (org-latex-preview--get-cached hash))
              (svg-path (car cached))
-             (svg-content (org-html-tex2svg--load-svg-content svg-path))
+             (svg-content (org-html-tex2svg--load-svg-content svg-path
+                                                              (org-trim body)))
              (id (org-html--reference el info t)))
         (org-html-tex2svg--format-html svg-content id)))))
 
